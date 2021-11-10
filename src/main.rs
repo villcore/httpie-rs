@@ -1,10 +1,12 @@
 use clap::{AppSettings, Clap};
 use anyhow::Result;
 use anyhow::anyhow;
-use reqwest::{Url, Client, Response};
+use colored::*;
+use reqwest::{Url, Client, Response, Version, StatusCode};
 use std::convert::TryInto;
 use std::time::Duration;
 use std::collections::HashMap;
+use reqwest::header::HeaderMap;
 
 #[derive(Debug, Clap)]
 #[clap(setting = AppSettings::ColoredHelp)]
@@ -38,7 +40,6 @@ struct BodyFormPair {
     v: String,
 }
 
-
 fn parse_url(s: &str) -> Result<String> {
     let _url = s.parse::<Url>()?;
     Ok(s.to_string())
@@ -66,8 +67,18 @@ async fn get(client: &Client, get: &Get) -> Result<()> {
         .get(&get.url)
         .timeout(Duration::from_secs(10))
         .send().await?;
-    println!("{}", response.text().await?);
+
+    try_print_response(response).await;
     Ok(())
+}
+
+async fn try_print_response(response: Response) -> Result<()> {
+    let version = response.version();
+    let status_code = response.status();
+    let header_map = response.headers().clone();
+    let text = response.text().await?;
+    let response_bundle = ResponseBundle(version, status_code, header_map, text);
+    print_response(response_bundle)
 }
 
 async fn post(client: &Client, post: &Post) -> Result<()> {
@@ -80,11 +91,43 @@ async fn post(client: &Client, post: &Post) -> Result<()> {
         .json(&body)
         .timeout(Duration::from_secs(10))
         .send().await?;
-    println!("{}", response.text().await?);
+    try_print_response(response).await?;
     Ok(())
 }
 
+struct ResponseBundle(Version, StatusCode, HeaderMap, String);
 
+fn print_response(response_bundle: ResponseBundle) -> Result<()> {
+    // print status line
+    let status_line = format!("{:?} {}\n", response_bundle.0, response_bundle.1).blue();
+    println!("{}", status_line);
+
+    // print header line
+    let mut pretty_style = Option::None;
+    for header in response_bundle.2 {
+        match header.0 {
+            Some(ref header_name) => {
+                let header_line = format!("{:?} : {:?}", header_name, header.1).green();
+                println!("{}", header_line);
+                if header_name == "application/json" {
+                    pretty_style = Some(true);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    match pretty_style {
+        Some(_) => {
+            println!("\n{}", response_bundle.3);
+        }
+
+        None => {
+            println!("\n{}", jsonxf::pretty_print(response_bundle.3.as_str()).unwrap().cyan());
+        }
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -92,7 +135,7 @@ async fn main() -> Result<()> {
     println!("{:?}", opts);
 
     let client = Client::new();
-    let response = match opts.subcmd {
+    match opts.subcmd {
         SubCommand::Get(data) => get(&client, &data).await?,
         SubCommand::Post(data) => post(&client, &data).await?,
     };
